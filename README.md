@@ -39,8 +39,8 @@ You will need a machine with:
 
 **Clone the repository:**
 ```bash
-git clone <your-repository-url>
-cd <your-repository-folder>
+git clone https://github.com/Chaos192/UE5-AI-Documentation.git
+cd UE5-AI-Documentation
 ```
 
 **Create a virtual environment (recommended):**
