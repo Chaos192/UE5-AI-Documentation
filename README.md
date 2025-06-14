@@ -78,18 +78,31 @@ python crawler.py
 
 ---
 
+Then run the script to get documentation:
+```bash
+python getunrealenginedocumentation.py
+```
+
+This script is a high-performance, resilient data pipeline designed to scrape the entire Unreal Engine documentation website, analyze its content, and create a structured database of the knowledge.
+
+It is built with a multi-threaded architecture to maximize speed and efficiency. The core of the scraper uses undetected-chromedriver to bypass advanced website security like Cloudflare, ensuring reliable access to the content.
+
+The entire process is managed through a central SQLite database (crawler_state.db), which tracks the status of every URL (new, in-progress, success, failed). This makes the script fully resumable and fault-tolerant; if it's stopped, it can be restarted and will intelligently pick up exactly where it left off. To handle the high volume of parallel database operations without conflicts, it uses a dedicated, asynchronous writer thread that processes all database writes in an orderly queue.
+
+As each page is scraped, the raw text is processed by a spaCy NLP model to extract key entities (like products and organizations), and the final structured data is saved to the database, creating a comprehensive knowledge base ready for the next stage of an AI training pipeline.
+
 ### 🧠 Stage 2: Generating the Q&A Dataset
 
 After crawling:
 
-1. **Insert your Gemini API key** in `generate_qa_dataset.py`:
+1. **Insert your Gemini API key** in `generate_qa_dataset_gemini.py`:
     ```python
     GEMINI_API_KEY = "YOUR_API_KEY_HERE"
     ```
 
 2. **Run the dataset generator:**
     ```bash
-    python 2_generate_qa_dataset.py
+    python generate_qa_dataset_gemini.py
     ```
 
 - This produces `ue5_qa_training_dataset.jsonl`
