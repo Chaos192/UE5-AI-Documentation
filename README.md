@@ -1,114 +1,154 @@
-UE5 LLaMA LoRA Data Pipeline
-This project provides a complete, multi-stage data pipeline for scraping the official Unreal Engine documentation, processing the content with AI, and generating a high-quality, structured dataset suitable for training a Large Language Model (LLM).
 
-This is a proof-of-concept project that showcases the potential for using small, locally trainable LLMs to create next-generation documentation tools, inspired by projects like bublint/ue5-llama-lora.
+# UE5 LLaMA LoRA Data Pipeline
 
-Key Features
-Robust Web Crawler: Utilizes undetected-chromedriver to bypass advanced bot detection and Cloudflare challenges on the target website.
+## 📑 Table of Contents
+- [Project Description](#project-description)
+- [How to Replicate](#how-to-replicate)
+  - [Initial Setup](#initial-setup)
+  - [Stage 1: Crawling the Documentation](#stage-1-crawling-the-documentation)
+  - [Stage 2: Generating the Q&A Dataset](#stage-2-generating-the-qa-dataset)
+  - [Stage 3: Fine-Tuning with LoRA](#stage-3-fine-tuning-with-lora)
+- [Expected Results](#expected-results)
+- [Limitations and Future Improvements](#limitations-and-future-improvements)
+- [License](#license)
+- [Acknowledgements](#acknowledgements)
 
-Resilient & Resumable: Uses a SQLite database to track the state of every URL (new, in-progress, success, failed), allowing the crawl to be stopped and resumed at any time without losing progress.
+---
 
-Intelligent Retry Logic: Automatically retries failed pages with an incremental backoff, making it resilient to temporary network or website errors.
+## 📘 Project Description
 
-High-Concurrency Architecture: Employs a multi-threaded approach with a dedicated, asynchronous database writer to prevent I/O bottlenecks and maximize scraping speed.
+This is a **proof-of-concept** project providing a complete data pipeline to create a specialized documentation assistant for **Unreal Engine 5**. Inspired by pioneering projects like [bublint/ue5-llama-lora](https://github.com/bublint/ue5-llama-lora), this repository explores the use of locally trainable LLMs to build powerful, context-aware development tools.
 
-AI-Powered Dataset Generation: Uses the Google Gemini Pro API to intelligently read scraped content and generate high-quality Question-Answer pairs.
+The core idea is that by **fine-tuning** a general-purpose LLM on a curated source of domain-specific knowledge, we can build an assistant that **outperforms even large general models** like ChatGPT on niche subjects.
 
-Optimized for Scale: Incorporates best practices like rotating log files, efficient batch database updates, and a configurable debug mode.
+### 🧩 Pipeline Overview
+1. A **robust, multi-threaded web crawler** to scrape Unreal Engine documentation, bypassing Cloudflare protections.
+2. An **AI-powered dataset generator** using the Gemini API to convert scraped text into a structured Question-Answer format.
 
-The Workflow
-The project is broken down into two main stages, each with its own script:
+The final output is a high-quality dataset ready for **LoRA fine-tuning** on models like LLaMA or Mistral, turning them into Unreal Engine experts.
 
-Stage 1: Crawling & Scraping (1_crawler.py)
+---
 
-This script navigates the entire Unreal Engine documentation site.
+## 🔧 How to Replicate
 
-It scrapes the clean text content from every page.
+You will need a machine with:
+- A modern NVIDIA GPU
+- Python 3.x installed
 
-It stores all found URLs, content, and processing status in the crawler_state.db database.
+### ✅ Initial Setup
 
-Stage 2: Q&A Dataset Generation (2_generate_qa_dataset.py)
-
-This script reads the raw content from the database created in Stage 1.
-
-It uses a powerful LLM (Google Gemini) to convert the raw text into structured question-answer pairs.
-
-The final output is a ue5_qa_training_dataset.jsonl file, perfectly formatted for LoRA fine-tuning.
-
-Setup and Installation
-Follow these steps to set up your environment.
-
-1. Clone the Repository
-
+**Clone the repository:**
+```bash
 git clone <your-repository-url>
 cd <your-repository-folder>
+```
 
-2. Create a Virtual Environment (Recommended)
-
+**Create a virtual environment (recommended):**
+```bash
 python -m venv venv
-source venv/bin/activate  # On Windows, use: venv\Scripts\activate
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
 
-3. Install Dependencies
-Install all required Python libraries using pip:
-
+**Install all dependencies:**
+```bash
 pip install undetected-chromedriver webdriver-manager google-generativeai spacy pandas beautifulsoup4 tqdm colorama
+```
 
-4. Download the NLP Model
-The scraper uses a small spaCy model for some initial analysis. Download it with the following command:
-
+**Download the NLP model:**
+```bash
 python -m spacy download en_core_web_sm
+```
 
-5. Get Your API Key
-The dataset generator requires a Google Gemini API key.
+**Get your API key:**
+- Visit [Google AI Studio](https://aistudio.google.com/) to obtain a free Gemini API key.
+- Paste the key into `2_generate_qa_dataset.py` under the `GEMINI_API_KEY` variable.
 
-Go to Google AI Studio to get your free key.
+---
 
-You will need to paste this key into the 2_generate_qa_dataset.py script.
+### 📄 Stage 1: Crawling the Documentation
 
-How to Use
-Run the scripts in the following order.
-
-Step 1: Run the Crawler
-This script will populate the crawler_state.db with the documentation content. It can take several hours to complete, but it is fully resumable.
-
+Run the crawler script to scrape Unreal Engine documentation:
+```bash
 python 1_crawler.py
+```
 
-This will run in fast, headless mode.
+- Output is saved in `crawler_state.db`.
+- Resumable if interrupted.
+- To watch it work or debug, set `DEBUG_MODE = True` in the script.
 
-To watch the browser windows for debugging, open the 1_crawler.py file and set DEBUG_MODE = True at the top.
+---
 
-Step 2: Generate the Training Dataset
-After the crawler has finished (or collected a good amount of data), run this script.
+### 🧠 Stage 2: Generating the Q&A Dataset
 
-Important: Open the 2_generate_qa_dataset.py file and replace the placeholder ... with your actual Gemini API key.
+After crawling:
 
-# In 2_generate_qa_dataset.py
-GEMINI_API_KEY = "YOUR_API_KEY_HERE"
+1. **Insert your Gemini API key** in `2_generate_qa_dataset.py`:
+    ```python
+    GEMINI_API_KEY = "YOUR_API_KEY_HERE"
+    ```
 
-Then, run the script from your terminal:
+2. **Run the dataset generator:**
+    ```bash
+    python 2_generate_qa_dataset.py
+    ```
 
-python 2_generate_qa_dataset.py
+- This produces `ue5_qa_training_dataset.jsonl`
+- **Note**: May incur API costs.
 
-This will read the database, make calls to the Gemini API, and create the ue5_qa_training_dataset.jsonl file. This process may incur costs depending on your API usage.
+---
 
-Step 3: Train Your Model
-With your ue5_qa_training_dataset.jsonl file ready, you can now use it to fine-tune a model. A popular tool for this is Oobabooga's Text Generation WebUI.
+### 🛠️ Stage 3: Fine-Tuning with LoRA
 
-Load a base model (e.g., a Mistral 7B or Llama 3 8B variant) in the WebUI.
+Use [Oobabooga's Text Generation WebUI](https://github.com/oobabooga/text-generation-webui):
 
-Go to the Training tab and select the LoRA method.
+1. **Set up the WebUI** following official instructions.
+2. **Load a base model**, such as:
+   - Mistral-7B
+   - LLaMA 3 8B
+3. **Train using LoRA**:
+   - Go to the **Training** tab.
+   - Choose **LoRA** method.
+   - Use your `ue5_qa_training_dataset.jsonl` as input.
+   - Configure training settings and start.
 
-Upload or select your .jsonl dataset.
+---
 
-Configure the training parameters and start the LoRA fine-tuning process.
+## 🎯 Expected Results
 
-File Descriptions
-1_crawler.py: The main crawler script that populates the database.
+After fine-tuning, your model should:
 
-2_generate_qa_dataset.py: The script that uses an LLM to generate the final Q&A training file.
+- Accurately answer technical UE5 questions (Nanite, Lumen, Mass Avoidance, etc.)
+- Provide relevant code/blueprint examples from documentation.
+- Minimize hallucinations by grounding output in source material.
 
-crawler_state.db: The SQLite database that stores all state, content, and results. This is the "brain" of the project.
+---
 
-ue5_qa_training_dataset.jsonl: The final output file containing the structured Q&A data, ready for training.
+## 🚧 Limitations and Future Improvements
 
-unified_scraper.log: A rotating log file that records the crawler's activity for debugging.
+- **Hallucinations**: Still possible without high-quality Q&A.
+- **Prompting**: Custom prompt formats can significantly improve performance.
+- **Dataset format**: Alternative structures (e.g., Alpaca-style) might yield better fine-tuning.
+- **Crawler speed**: Simpler methods may be faster but less resilient.
+
+---
+
+## 📄 License
+
+This project is licensed under the **MIT License**. See `LICENSE` file for details.
+
+---
+
+## 🙏 Acknowledgements
+
+- Inspired by [bublint/ue5-llama-lora](https://github.com/bublint/ue5-llama-lora)
+- Oobabooga's amazing **Text Generation WebUI**
+- The open-source contributors behind:
+  - `undetected-chromedriver`
+  - `beautifulsoup4`
+  - `spacy`
+  - `google-generativeai`
+  - and more
+
+---
+
+> _Built to empower game developers and AI tinkerers alike._ 🎮🤖
