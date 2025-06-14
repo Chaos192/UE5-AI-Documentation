@@ -1,9 +1,10 @@
 import time
 import logging
+from logging.handlers import RotatingFileHandler
 import sqlite3
 import threading
 import multiprocessing
-import traceback 
+import traceback
 from collections import deque
 from urllib.parse import urljoin, urlparse
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -15,83 +16,76 @@ from bs4 import BeautifulSoup
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import WebDriverException, TimeoutException
 from tqdm import tqdm
 
 # --- Configuration ---
+# --- MODIFIED: Set to True to see the browser windows (GUI) ---
+DEBUG_MODE = True
+
 START_URL = "https://dev.epicgames.com/documentation/en-us/unreal-engine"
 URL_PREFIX = "https://dev.epicgames.com/documentation/en-us/unreal-engine"
 ALLOWED_DOMAIN = "dev.epicgames.com"
 DB_FILE = "crawled_data.db"
-# A good balance for performance in visual mode
-MAX_WORKERS = 4
+LOG_FILE = "crawler.log"
+
+# Use fewer workers in debug mode so it's easier to watch
+MAX_WORKERS = 4 if DEBUG_MODE else min(10, multiprocessing.cpu_count() + 4)
 DRIVER_RECYCLE_INTERVAL_SECONDS = 3600
-WRITE_BUFFER_SIZE = 100
+WRITE_BUFFER_SIZE = 200
 MAX_RETRIES = 3 
 WEBDRIVER_TIMEOUT_SECONDS = 90
 
-# --- Logging ---
-logging.basicConfig(
-    filename="crawler.log", level=logging.INFO, filemode="w",
-    format="%(asctime)s - %(threadName)s - %(levelname)s - %(message)s"
-)
+# --- Logging Setup ---
+log_formatter = logging.Formatter('%(asctime)s - %(threadName)s - %(levelname)s - %(message)s')
+log_handler = RotatingFileHandler(LOG_FILE, maxBytes=10*1024*1024, backupCount=3)
+log_handler.setFormatter(log_formatter)
+logger = logging.getLogger()
+logger.setLevel(logging.INFO)
+logger.addHandler(log_handler)
 
 # --- Database & State Management ---
-def init_db(db_path):
-    conn = sqlite3.connect(db_path)
-    cursor = conn.cursor()
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS pages (url TEXT PRIMARY KEY, title TEXT, scraped_at REAL)
-    """)
-    conn.commit()
-    return conn
+def init_db(db_path: str):
+    """Ensures the required tables and columns exist."""
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pages (
+                url TEXT PRIMARY KEY, title TEXT, scraped_at REAL,
+                attempts INTEGER DEFAULT 0, status TEXT DEFAULT 'new'
+            )
+        """)
+        try: cursor.execute("ALTER TABLE pages ADD COLUMN status TEXT DEFAULT 'new'")
+        except sqlite3.OperationalError: pass
+        try: cursor.execute("ALTER TABLE pages ADD COLUMN attempts INTEGER DEFAULT 0")
+        except sqlite3.OperationalError: pass
+        conn.commit()
 
-def load_visited_urls(conn) -> set:
-    print("Loading previously visited URLs from the database...")
-    cursor = conn.cursor()
-    cursor.execute("SELECT url FROM pages")
-    return {row[0] for row in cursor.fetchall()}
-
-def flush_buffer_to_db(buffer, conn, lock):
-    if not buffer: return
-    with lock:
-        try:
-            cursor = conn.cursor()
-            cursor.executemany("INSERT OR IGNORE INTO pages (url, title, scraped_at) VALUES (?, ?, ?)", buffer)
-            conn.commit()
-            logging.info(f"Flushed {len(buffer)} records to the database.")
-            buffer.clear()
-        except sqlite3.Error as e:
-            logging.error(f"Database error while flushing buffer: {e}")
-
-# --- WebDriver function ---
+# --- WebDriver Pool & Worker ---
 def create_driver():
-    """Creates a new undetected Chrome WebDriver instance in VISUAL mode."""
+    """Creates a WebDriver instance, visible or headless based on DEBUG_MODE."""
     options = uc.ChromeOptions()
-    
-    # Running in visual mode is the stable solution for this site
-    options.headless = False
-    
+    options.headless = not DEBUG_MODE
     options.add_argument("--disable-blink-features=AutomationControlled")
-    options.add_argument("window-size=1920,1080")
-
+    if not DEBUG_MODE:
+        options.add_argument('--no-sandbox')
+        options.add_argument('--disable-dev-shm-usage')
+    else:
+        # Set a visible window size for debug mode
+        options.add_argument("window-size=1280,720")
+        
     try:
-        # Using your specific Chrome version
         chrome_major_version = 137
         driver = uc.Chrome(version_main=chrome_major_version, options=options)
     except Exception as e:
         logging.error(f"Failed to create undetected_chromedriver: {e}")
-        logging.error("Please ensure Google Chrome is installed and the version is set correctly.")
         return None
     return driver
-
 
 @contextmanager
 def get_driver_from_pool(driver_pool: Queue):
     driver, creation_time = driver_pool.get()
     try:
         if time.time() - creation_time > DRIVER_RECYCLE_INTERVAL_SECONDS:
-            logging.info("Recycling old WebDriver instance.")
             if driver: driver.quit()
             driver = create_driver()
             creation_time = time.time()
@@ -99,121 +93,121 @@ def get_driver_from_pool(driver_pool: Queue):
     finally:
         driver_pool.put((driver, creation_time))
 
-def exponential_backoff(retry_attempt: int, base_delay: int = 5, max_delay: int = 45) -> int:
-    return min(base_delay * (2 ** retry_attempt), max_delay)
-
 def worker(url: str, driver_pool: Queue) -> dict:
-    page_data = {"url": url, "title": None, "new_links": set()}
+    """Processes a single URL and returns its result."""
     for attempt in range(MAX_RETRIES):
         try:
             with get_driver_from_pool(driver_pool) as driver:
-                if driver is None: break
+                if driver is None: continue
                 driver.get(url)
-
-                WebDriverWait(driver, WEBDRIVER_TIMEOUT_SECONDS).until(
-                    EC.title_contains("Unreal Engine")
-                )
-                time.sleep(5) 
-
+                WebDriverWait(driver, WEBDRIVER_TIMEOUT_SECONDS).until(EC.title_contains("Unreal Engine"))
+                time.sleep(3) 
                 soup = BeautifulSoup(driver.page_source, "html.parser")
-                page_data["title"] = soup.title.string.strip() if soup.title else ""
-
-                for a_tag in soup.find_all("a", href=True):
-                    full_url = urljoin(url, a_tag["href"])
-                    if (full_url.startswith(URL_PREFIX) and urlparse(full_url).netloc == ALLOWED_DOMAIN and "#" not in full_url):
-                        page_data["new_links"].add(full_url)
-                
-                logging.info(f"Successfully scraped {url}")
-                return page_data
-
-        except TimeoutException:
-            logging.warning(f"Timeout waiting for title on {url} on attempt {attempt + 1}/{MAX_RETRIES}.")
-            if attempt < MAX_RETRIES - 1:
-                wait_time = exponential_backoff(attempt)
-                logging.info(f"Waiting {wait_time}s before next retry...")
-                time.sleep(wait_time)
-            else:
-                logging.error(f"Failed to load {url} after {MAX_RETRIES} attempts.")
-        
-        except Exception as e:
-            logging.error(f"An unexpected error occurred in worker for {url} on attempt {attempt+1}")
-            logging.error(f"Exception Type: {type(e)}")
-            logging.error(f"Exception Message: {e}")
-            logging.error(f"Traceback: {traceback.format_exc()}")
-            
+                title = soup.title.string.strip() if soup.title else "Untitled"
+                new_links = {
+                    urljoin(url, a["href"]) for a in soup.find_all("a", href=True)
+                    if urljoin(url, a["href"]).startswith(URL_PREFIX) and urlparse(urljoin(url, a["href"])).netloc == ALLOWED_DOMAIN and "#" not in urljoin(url, a["href"])
+                }
+                return {"status": "success", "title": title, "new_links": new_links}
+        except Exception:
+            logging.error(f"Worker failed on url {url} (attempt {attempt+1}/{MAX_RETRIES}):\n{traceback.format_exc()}")
             if attempt < MAX_RETRIES - 1:
                 time.sleep(5)
-            else:
-                logging.error(f"Final attempt failed for {url}")
-            
-    return page_data
+    return {"status": "failed", "new_links": set()}
 
-# --- Main Execution ---
+# --- Main Orchestrator ---
 def main():
-    db_conn = init_db(DB_FILE)
-    visited_urls = load_visited_urls(db_conn)
-    queue = deque([START_URL] if START_URL not in visited_urls else [])
+    init_db(DB_FILE)
+    
+    db_conn = sqlite3.connect(DB_FILE, timeout=10)
     db_lock = threading.Lock()
-    write_buffer = []
+    
+    with db_lock:
+        cursor = db_conn.cursor()
+        cursor.execute("INSERT OR IGNORE INTO pages (url) VALUES (?)", (START_URL,))
+        cursor.execute("SELECT url FROM pages WHERE status != 'success' AND attempts < ?", (MAX_RETRIES,))
+        urls_to_process = deque([row[0] for row in cursor.fetchall()])
+        cursor.execute("SELECT count(*) FROM pages WHERE status = 'success'")
+        completed_count = cursor.fetchone()[0]
+        cursor.execute("SELECT count(*) FROM pages")
+        total_known_urls = cursor.fetchone()[0]
+        db_conn.commit()
 
-    print(f"Initializing with {MAX_WORKERS} workers...")
+    if not urls_to_process:
+        print("All known URLs have been processed. Nothing to do.")
+        print("If this is incorrect, run the `reset.py` script again.")
+        return
+        
+    print(f"Resuming crawl. To-Do: {len(urls_to_process)}, Completed: {completed_count}, Total Known: {total_known_urls}")
+
     driver_pool = Queue(maxsize=MAX_WORKERS)
     for _ in range(MAX_WORKERS):
         driver = create_driver()
-        if driver:
-            driver_pool.put((driver, time.time()))
+        if driver: driver_pool.put((driver, time.time()))
 
     if driver_pool.empty():
         print("Could not create any WebDriver instances. Exiting.")
         return
 
-    try:
-        with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="Crawler") as executor:
-            futures = {executor.submit(worker, url, driver_pool): url for url in queue}
-            pbar = tqdm(total=len(queue) + len(visited_urls), initial=len(visited_urls), desc="Crawling")
+    pbar = tqdm(total=total_known_urls, initial=completed_count, desc="Crawling")
+    with ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="Crawler") as executor:
+        futures = {executor.submit(worker, urls_to_process.popleft(), driver_pool): None for _ in range(min(len(urls_to_process), MAX_WORKERS*2))}
+        for i in range(len(futures)):
+             # Associate the future with its URL
+             future = list(futures.keys())[i]
+             futures[future] = list(set(urls_to_process) | {START_URL})[i] if i < len(list(set(urls_to_process) | {START_URL})) else START_URL
 
+        try:
             while futures:
                 for future in as_completed(futures):
-                    result_data = future.result()
-                    futures.pop(future)
-                    pbar.update(1)
-
-                    if result_data.get("title"):
-                        pbar.write(f"[SCRAPED] {result_data['title']} | {result_data['url']}")
-                        with db_lock:
-                            write_buffer.append((result_data["url"], result_data["title"], time.time()))
+                    original_url = futures.pop(future)
+                    result = future.result()
                     
-                    new_links_to_add = []
                     with db_lock:
-                        for link in result_data.get("new_links", set()):
-                            if link not in visited_urls:
-                                visited_urls.add(link)
-                                new_links_to_add.append(link)
-                    
-                    if new_links_to_add:
-                        for link in new_links_to_add:
-                            if len(futures) < MAX_WORKERS * 2:
-                                futures[executor.submit(worker, link, driver_pool)] = link
-                        pbar.total = len(visited_urls)
-                        pbar.set_postfix({"Discovered": len(visited_urls)})
-                    
-                    if len(write_buffer) >= WRITE_BUFFER_SIZE:
-                        flush_buffer_to_db(write_buffer, db_conn, db_lock)
-    
-    except KeyboardInterrupt:
-        print("\nShutdown signal received...")
-    finally:
-        print("Cleaning up: flushing buffer and closing drivers...")
-        flush_buffer_to_db(write_buffer, db_conn, db_lock)
-        db_conn.close()
-        
-        while not driver_pool.empty():
-            try:
-                driver, _ = driver_pool.get_nowait()
-                if driver: driver.quit()
-            except Exception: pass
-        pbar.close()
-        print("Crawler finished gracefully.")
+                        cursor = db_conn.cursor()
+                        if result["status"] == "success":
+                            cursor.execute(
+                                "UPDATE pages SET title = ?, scraped_at = ?, status = 'success', attempts = attempts + 1 WHERE url = ?",
+                                (result['title'], time.time(), original_url)
+                            )
+                            pbar.update(1)
+                        else:
+                            cursor.execute(
+                                "UPDATE pages SET status = 'failed', attempts = attempts + 1 WHERE url = ?",
+                                (original_url,)
+                            )
+                        
+                        newly_added_links = []
+                        for link in result.get("new_links", set()):
+                            try:
+                                cursor.execute("INSERT OR IGNORE INTO pages (url) VALUES (?)", (link,))
+                                if cursor.rowcount > 0:
+                                    newly_added_links.append(link)
+                            except sqlite3.IntegrityError:
+                                continue
+                        db_conn.commit()
+
+                        if newly_added_links:
+                            urls_to_process.extend(newly_added_links)
+                            pbar.total += len(newly_added_links)
+
+                    if urls_to_process:
+                        next_url = urls_to_process.popleft()
+                        futures[executor.submit(worker, next_url, driver_pool)] = next_url
+
+        except KeyboardInterrupt:
+            print("\nShutdown signal received...")
+        finally:
+            print("\nCleaning up...")
+            pbar.close()
+            db_conn.close()
+            for future in futures: future.cancel()
+            while not driver_pool.empty():
+                try:
+                    driver, _ = driver_pool.get_nowait()
+                    if driver: driver.quit()
+                except Exception: pass
+            print("Crawler finished gracefully.")
 
 if __name__ == "__main__":
     main()
