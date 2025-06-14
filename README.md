@@ -69,7 +69,7 @@ python -m spacy download en_core_web_sm
 
 Run the crawler script to scrape Unreal Engine documentation:
 ```bash
-python 1_crawler.py
+python crawler.py
 ```
 
 - Output is saved in `crawler_state.db`.
@@ -82,7 +82,7 @@ python 1_crawler.py
 
 After crawling:
 
-1. **Insert your Gemini API key** in `2_generate_qa_dataset.py`:
+1. **Insert your Gemini API key** in `generate_qa_dataset.py`:
     ```python
     GEMINI_API_KEY = "YOUR_API_KEY_HERE"
     ```
